@@ -94,8 +94,6 @@ func (app *App) InitServices(config interfaces.Config, Logger interfaces.Logger)
 
 // Run is a separated main-function to ease testing
 func (app *App) Run() {
-	// Run the gRPC API
-
 	defer app.Server.Close()
 	defer app.Storage.Close()
 	defer app.P2p.Close()
@@ -106,5 +104,7 @@ func (app *App) Run() {
 		}
 		go app.debugPinger()
 	}
+
+	// Run the gRPC API
 	app.Server.Run(app.config.GetUint("rpc.port"))
 }
