@@ -56,53 +56,6 @@ func NewP2p(log interfaces.Logger, config interfaces.Config, privateKey crypto.P
 	return
 }
 
-func (p2p *P2p) listenForInput() (err error) {
-	for {
-		select {
-		case message := <-p2p.input:
-			p2p.handleInput(&message)
-		}
-	}
-}
-
-func (p2p *P2p) connectToPeers() {
-	if p2p.Logger != nil {
-		p2p.Logger.Infof("This node's ID: %s\n", p2p.host.ID())
-		p2p.Logger.Infof("Listening to the following addresses: %s\n", p2p.host.Addrs())
-	}
-
-	var wg sync.WaitGroup
-	go func(ctx context.Context) {
-		for peer := range p2p.peerChan {
-			if peer.ID == p2p.host.ID() {
-				if p2p.Logger != nil {
-					p2p.Logger.Debug("Found a new peer!")
-					p2p.Logger.Debug("But the peer was you!")
-				}
-				continue
-			}
-			if p2p.Logger != nil {
-				p2p.Logger.Infof("Found a new peer: %s\n", peer.ID)
-			}
-
-			wg.Add(1)
-			go func(ctx context.Context) {
-				defer wg.Done()
-				if err := p2p.host.Connect(ctx, peer); !errors.IsEmpty(err) {
-					if p2p.Logger != nil {
-						p2p.Logger.Error(errors.E(errors.Op("Connect"), err))
-					}
-				} else {
-					if p2p.Logger != nil {
-						p2p.Logger.Infof("Connected to: %s\n", peer)
-					}
-				}
-			}(p2p.ctx)
-			wg.Wait()
-		}
-	}(p2p.ctx)
-}
-
 // RegisterOrderService registers an order service to persist order data locally
 func (p2p *P2p) RegisterOrderService(orders interfaces.OrderService) {
 	p2p.Orders = orders
@@ -113,29 +66,20 @@ func (p2p *P2p) RegisterChannelService(channels interfaces.ChannelService) {
 	p2p.Channels = channels
 }
 
-func (p2p *P2p) handleInput(message *pb.WireMessage) {
-	buf, err := proto.Marshal(message)
-	if !errors.IsEmpty(err) {
-		if p2p.Logger != nil {
-			p2p.Logger.Error(errors.E(errors.Op("Marshal proto"), err))
-		}
-	}
-	err = p2p.ps.Publish(string(message.GetChannelID()), buf)
-	if !errors.IsEmpty(err) {
-		if p2p.Logger != nil {
-			p2p.Logger.Error(errors.E(errors.Op("Marshal proto"), fmt.Sprintf("%v, message data: %s", err.Error(), message.Data)))
-		}
-	}
+func (p2p *P2p) initContext() {
+	p2p.ctx = context.Background()
 }
 
-// Send queues a message for sending to other peers
-func (p2p *P2p) Send(message *pb.WireMessage) {
-	if p2p.Logger != nil {
-		p2p.Logger.Debugf("Sending order %s to channel %s", message.GetData(), message.GetChannelID())
+func (p2p *P2p) initHost(options ...libp2pConfig.Option) {
+	var err error
+	p2p.host, err = libp2p.New(
+		p2p.ctx,
+		options...)
+	if !errors.IsEmpty(err) {
+		if p2p.Logger != nil {
+			p2p.Logger.Error(errors.E(errors.Op("Add host"), err))
+		}
 	}
-	go func(ctx context.Context) {
-		p2p.input <- *message
-	}(p2p.ctx)
 }
 
 func (p2p *P2p) initPubSub() {
@@ -146,73 +90,6 @@ func (p2p *P2p) initPubSub() {
 			p2p.Logger.Error(err)
 		}
 	}
-}
-
-// Subscribe subscribes to a libp2p pubsub channel defined with "channel"
-func (p2p *P2p) Subscribe(channel *pb.Channel) {
-	if p2p.Logger != nil {
-		p2p.Logger.Infof("Subscribing to channel %s with options: %s", channel.GetId(), channel.GetOptions())
-	}
-	sub, err := p2p.ps.Subscribe(string(channel.GetId()))
-	if !errors.IsEmpty(err) {
-		if p2p.Logger != nil {
-			p2p.Logger.Error(errors.E(errors.Op("Subscribe"), err))
-		}
-	}
-
-	quitSignal := make(chan bool)
-	p2p.subscriptions[string(channel.GetId())] = quitSignal
-
-	go func(ctx context.Context) {
-		for {
-			msg, err := sub.Next(ctx)
-			if !errors.IsEmpty(err) {
-				if p2p.Logger != nil {
-					p2p.Logger.Error(errors.E(errors.Op("Next Message"), err))
-				}
-			}
-
-			data := msg.GetData()
-			peer := msg.GetFrom()
-
-			if peer != p2p.host.ID() {
-				if p2p.Logger != nil {
-					p2p.Logger.Infof("Received order from peer %s: %s", peer, data)
-				}
-
-				if p2p.Orders != nil {
-					err = p2p.Orders.Receive(data)
-					if !errors.IsEmpty(err) {
-						if p2p.Logger != nil {
-							p2p.Logger.Error(errors.E(errors.Op("Receive order"), err))
-						}
-					}
-				} else {
-					if p2p.Logger != nil {
-						p2p.Logger.Warn("P2p: OrderService not registered with p2p, not persisting incoming orders to DB!")
-					}
-				}
-			}
-
-			select {
-			case quit := <-quitSignal: //Delete subscription
-				if quit {
-					delete(p2p.subscriptions, string(channel.GetId()))
-					return
-				}
-			default:
-			}
-		}
-	}(p2p.ctx)
-}
-
-// Unsubscribe sends a quit signal to a channel goroutine
-func (p2p *P2p) Unsubscribe(channel *pb.Channel) {
-	p2p.subscriptions[string(channel.GetId())] <- true
-}
-
-func (p2p *P2p) initContext() {
-	p2p.ctx = context.Background()
 }
 
 func (p2p *P2p) bootstrapDHT() {
@@ -280,16 +157,139 @@ func (p2p *P2p) startDiscovery() {
 	}
 }
 
-func (p2p *P2p) initHost(options ...libp2pConfig.Option) {
-	var err error
-	p2p.host, err = libp2p.New(
-		p2p.ctx,
-		options...)
+func (p2p *P2p) connectToPeers() {
+	if p2p.Logger != nil {
+		p2p.Logger.Infof("This node's ID: %s\n", p2p.host.ID())
+		p2p.Logger.Infof("Listening to the following addresses: %s\n", p2p.host.Addrs())
+	}
+
+	var wg sync.WaitGroup
+	go func(ctx context.Context) {
+		for peer := range p2p.peerChan {
+			if peer.ID == p2p.host.ID() {
+				if p2p.Logger != nil {
+					p2p.Logger.Debug("Found a new peer!")
+					p2p.Logger.Debug("But the peer was you!")
+				}
+				continue
+			}
+			if p2p.Logger != nil {
+				p2p.Logger.Infof("Found a new peer: %s\n", peer.ID)
+			}
+
+			wg.Add(1)
+			go func(ctx context.Context) {
+				defer wg.Done()
+				if err := p2p.host.Connect(ctx, peer); !errors.IsEmpty(err) {
+					if p2p.Logger != nil {
+						p2p.Logger.Error(errors.E(errors.Op("Connect"), err))
+					}
+				} else {
+					if p2p.Logger != nil {
+						p2p.Logger.Infof("Connected to: %s\n", peer)
+					}
+				}
+			}(p2p.ctx)
+			wg.Wait()
+		}
+	}(p2p.ctx)
+}
+
+func (p2p *P2p) handleInput(message *pb.WireMessage) {
+	buf, err := proto.Marshal(message)
 	if !errors.IsEmpty(err) {
 		if p2p.Logger != nil {
-			p2p.Logger.Error(errors.E(errors.Op("Add host"), err))
+			p2p.Logger.Error(errors.E(errors.Op("Marshal proto"), err))
 		}
 	}
+	err = p2p.ps.Publish(string(message.GetChannelID()), buf)
+	if !errors.IsEmpty(err) {
+		if p2p.Logger != nil {
+			p2p.Logger.Error(errors.E(errors.Op("Marshal proto"), fmt.Sprintf("%v, message data: %s", err.Error(), message.Data)))
+		}
+	}
+}
+
+func (p2p *P2p) listenForInput() (err error) {
+	for {
+		select {
+		case message := <-p2p.input:
+			p2p.handleInput(&message)
+		}
+	}
+}
+
+// Send queues a message for sending to other peers
+func (p2p *P2p) Send(message *pb.WireMessage) {
+	if p2p.Logger != nil {
+		p2p.Logger.Debugf("Sending order %s to channel %s", message.GetData(), message.GetChannelID())
+	}
+	go func(ctx context.Context) {
+		p2p.input <- *message
+	}(p2p.ctx)
+}
+
+// Subscribe subscribes to a libp2p pubsub channel defined with "channel"
+func (p2p *P2p) Subscribe(channel *pb.Channel) {
+	if p2p.Logger != nil {
+		p2p.Logger.Infof("Subscribing to channel %s with options: %s", channel.GetId(), channel.GetOptions())
+	}
+	sub, err := p2p.ps.Subscribe(string(channel.GetId()))
+	if !errors.IsEmpty(err) {
+		if p2p.Logger != nil {
+			p2p.Logger.Error(errors.E(errors.Op("Subscribe"), err))
+		}
+	}
+
+	quitSignal := make(chan bool)
+	p2p.subscriptions[string(channel.GetId())] = quitSignal
+
+	go func(ctx context.Context) {
+		for {
+			msg, err := sub.Next(ctx)
+			if !errors.IsEmpty(err) {
+				if p2p.Logger != nil {
+					p2p.Logger.Error(errors.E(errors.Op("Next Message"), err))
+				}
+			}
+
+			data := msg.GetData()
+			peer := msg.GetFrom()
+
+			if peer != p2p.host.ID() {
+				if p2p.Logger != nil {
+					p2p.Logger.Infof("Received order from peer %s: %s", peer, data)
+				}
+
+				if p2p.Orders != nil {
+					err = p2p.Orders.Receive(data)
+					if !errors.IsEmpty(err) {
+						if p2p.Logger != nil {
+							p2p.Logger.Error(errors.E(errors.Op("Receive order"), err))
+						}
+					}
+				} else {
+					if p2p.Logger != nil {
+						p2p.Logger.Warn("P2p: OrderService not registered with p2p, not persisting incoming orders to DB!")
+					}
+				}
+			}
+
+			select {
+			case quit := <-quitSignal: //Delete subscription
+				if quit {
+					delete(p2p.subscriptions, string(channel.GetId()))
+					return
+				}
+			default:
+			}
+		}
+	}(p2p.ctx)
+}
+
+// Unsubscribe sends a quit signal to a channel goroutine
+func (p2p *P2p) Unsubscribe(channel *pb.Channel) {
+	p2p.subscriptions[string(channel.GetId())] <- true
 }
 
 // Run runs the p2p network
