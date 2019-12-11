@@ -1,3 +1,7 @@
+[log]
+format = "console"
+level = "INFO"
+
 [database]
 path = "/var/lib/sprawl/data"
 
@@ -10,7 +14,7 @@ externalIP = ""
 port = 4001
 enableRelay = true
 enableAutoRelay = true
-enableNATPortMap = false
+enableNATPortMap = true
 
 [errors]
 enableStackTrace = false

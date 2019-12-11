@@ -1,3 +1,7 @@
+[log]
+format = "console"
+level = "DEBUG"
+
 [database]
 path = "/var/lib/sprawl/test"
 
@@ -13,4 +17,4 @@ enableAutoRelay = true
 enableNATPortMap = false
 
 [errors]
-enableStackTrace = false
+enableStackTrace = true
